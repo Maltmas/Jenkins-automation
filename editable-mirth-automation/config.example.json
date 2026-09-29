@@ -1,0 +1,16 @@
+{
+  "mode": "mock",
+  "clients": {
+    "CHS": {
+      "mirth_base_url": "https://CHANGE_REQUIRED_CHS_MIRTH_IP:CHANGE_REQUIRED_PORT",
+      "channel_id": "CHANGE_REQUIRED_CHS_CHANNEL_UUID",
+      "pcp_outbound_metadata_id": "CHANGE_REQUIRED_NUMERIC_CONNECTOR_ID"
+    },
+    "LABFLY": {
+      "mirth_base_url": "https://CHANGE_REQUIRED_LABFLY_MIRTH_IP:CHANGE_REQUIRED_PORT",
+      "channel_id": "CHANGE_REQUIRED_LABFLY_CHANNEL_UUID",
+      "pcp_outbound_metadata_id": "CHANGE_REQUIRED_NUMERIC_CONNECTOR_ID"
+    }
+  }
+}
+

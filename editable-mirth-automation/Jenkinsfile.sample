@@ -1,0 +1,52 @@
+pipeline {
+    agent { label 'CHANGE_REQUIRED_INTERNAL_MIRTH_AGENT' }
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        choice(name: 'CLIENT', choices: ['CHS', 'LABFLY'])
+        string(name: 'MESSAGE_ID', description: 'Message ID received in email')
+        string(name: 'MIRTH_MESSAGE_ID', description: 'Resolved internal numeric Mirth ID')
+        booleanParam(name: 'DRY_RUN', defaultValue: true)
+    }
+
+    stages {
+        stage('Install') {
+            steps {
+                bat '''
+                    py -3 -m venv .venv
+                    .venv\\Scripts\\python.exe -m pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Inspect / Reprocess') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'CHANGE_REQUIRED_MIRTH_CREDENTIAL_ID',
+                        usernameVariable: 'MIRTH_USERNAME',
+                        passwordVariable: 'MIRTH_PASSWORD'
+                    )
+                ]) {
+                    script {
+                        def executeFlag = params.DRY_RUN ? '' : '--execute'
+                        bat """
+                            .venv\\Scripts\\python.exe automation.py ^
+                              --client "${params.CLIENT}" ^
+                              --message-id "${params.MESSAGE_ID}" ^
+                              --mirth-message-id "${params.MIRTH_MESSAGE_ID}" ^
+                              --config config.json ^
+                              ${executeFlag}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
+

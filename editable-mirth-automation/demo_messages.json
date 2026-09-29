@@ -1,0 +1,8 @@
+{
+  "2001114923629869": {
+    "client": "CHS",
+    "mirth_message_id": 12345,
+    "status": "ERROR",
+    "destination": "PCP_Outbound"
+  }
+}

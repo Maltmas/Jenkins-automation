@@ -1,0 +1,7 @@
+.venv/
+.env
+config.json
+__pycache__/
+*.pyc
+audit/*.json
+
