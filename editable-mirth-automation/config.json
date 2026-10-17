@@ -2,12 +2,12 @@
   "base_url": "https://10.15.10.102:9091",
   "clients": {
     "CHS": {
-      "channel_name": "CHANGE_ME",
-      "destination_name": "CHANGE_ME"
+      "channel_name": "4_0_Inbound_CCDA_CERNER",
+      "destination_name": "Destination 1"
     },
     "LABFLY": {
-      "channel_name": "CHANGE_ME",
-      "destination_name": "CHANGE_ME"
+      "channel_name": "4_0_Inbound_CCDA_MEDHOST",
+      "destination_name": "Destination 1"
     }
   }
 }
