@@ -244,7 +244,40 @@ def do_reprocess(args: argparse.Namespace) -> int:
             audit["result"] = "SKIPPED_NOT_ERROR"
             raise MirthError("No connector of this message is in ERROR. Nothing done.")
 
-        if 0 in error_ids:
+        selected = None
+        if args.destination:
+            by_name = {n.lower(): m for m, n in dest_names.items() if m != 0}
+            selected = []
+            for raw in args.destination:
+                for d in raw.split(","):
+                    d = d.strip()
+                    if not d:
+                        continue
+                    meta = by_name.get(d.lower())
+                    if meta is None:
+                        avail = ", ".join(sorted(n for m, n in dest_names.items() if m != 0))
+                        raise MirthError(
+                            f"Destination '{d}' not found in {args.channel}. Available: {avail}"
+                        )
+                    if meta not in selected:
+                        selected.append(meta)
+            audit["selected_destinations"] = [dest_names[m] for m in selected]
+
+        if selected is not None:
+            names = ", ".join(dest_names[m] for m in selected)
+            if 0 in error_ids:
+                plan_ids = selected
+                print(f"Plan: Source is in ERROR -> reprocess the message, sending ONLY to: {names}")
+            else:
+                plan_ids = [m for m in selected if statuses.get(m) == "ERROR"]
+                if not plan_ids:
+                    audit["result"] = "SKIPPED_NOT_ERROR"
+                    raise MirthError(f"Selected destination(s) ({names}) are not in ERROR. Nothing done.")
+                print(
+                    "Plan: reprocess only: "
+                    + ", ".join(dest_names[m] for m in plan_ids)
+                )
+        elif 0 in error_ids:
             plan_ids = None
             print("Plan: Source connector is in ERROR -> reprocess the WHOLE message.")
         else:
@@ -288,6 +321,11 @@ def main() -> int:
     p.add_argument("--channel", help="Exact channel name, e.g. 4_0_Inbound_CCDA_CERNER")
     p.add_argument("--message-id", help="Message ID from the alert email (text search in the channel)")
     p.add_argument("--mirth-message-id", type=int, help="Skip search; use this internal Mirth message ID")
+    p.add_argument(
+        "--destination",
+        action="append",
+        help="Reprocess only this destination name (e.g. HTTPS). Repeat or comma-separate for several.",
+    )
     p.add_argument("--execute", action="store_true", help="Actually reprocess (default is dry run)")
     p.add_argument("--insecure", action="store_true", help="Skip TLS certificate check (dev only)")
     p.add_argument("--base-url", help="e.g. https://10.15.10.102:9091 (default: MIRTH_URL or config.json)")
