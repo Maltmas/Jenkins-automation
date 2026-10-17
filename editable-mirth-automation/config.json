@@ -1,0 +1,13 @@
+{
+  "base_url": "https://10.15.10.102:9091",
+  "clients": {
+    "CHS": {
+      "channel_name": "CHANGE_ME",
+      "destination_name": "CHANGE_ME"
+    },
+    "LABFLY": {
+      "channel_name": "CHANGE_ME",
+      "destination_name": "CHANGE_ME"
+    }
+  }
+}
