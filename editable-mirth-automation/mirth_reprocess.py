@@ -8,7 +8,7 @@ Flow:
   4. See which connectors are in ERROR:
        - Source connector in ERROR  -> reprocess the whole message
        - only destinations in ERROR -> reprocess just those destinations
-  5. Dry run (default) or reprocess (--execute): uses the single-message endpoint, so only that one message is touched and it is overwritten in place
+  5. Dry run (default) or reprocess (--execute): uses the single-message endpoint, so only that one message is reprocessed; the script reports whether Mirth created a new message
 
 Credentials come from environment variables MIRTH_USERNAME / MIRTH_PASSWORD.
 No message content (possible PHI) is ever printed or written to the audit log.
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import sys
 import xml.etree.ElementTree as ET
@@ -126,9 +127,23 @@ class Mirth:
         found = self._parse_messages(r.content)
         return found[0] if found else None
 
+    def max_message_id(self, channel_id: str) -> int | None:
+        """Highest message ID in the channel (used to detect new messages)."""
+        try:
+            r = self.s.get(
+                f"{self.base}/channels/{channel_id}/messages/maxMessageId",
+                headers=XML_ACCEPT,
+                timeout=TIMEOUT,
+            )
+            r.raise_for_status()
+            m = re.search(r"\d+", r.text)
+            return int(m.group()) if m else None
+        except requests.RequestException:
+            return None
+
     # ---- action ----
     def reprocess(self, channel_id: str, message_id: int, dest_meta_ids: list[int] | None) -> None:
-        """Reprocess ONE message and overwrite it in place.
+        """Reprocess ONE message.
 
         Uses POST /channels/{channelId}/messages/{messageId}/_reprocess. The message ID is
         part of the URL, so this can never touch any other message in the channel.
@@ -292,21 +307,49 @@ def do_reprocess(args: argparse.Namespace) -> int:
             return 0
 
         # 3. Reprocess and report
+        max_before = mirth.max_message_id(channel_id)
         mirth.reprocess(channel_id, mirth_id, plan_ids)
-        print("Reprocess request accepted by Mirth (the message is overwritten in place).")
+        print("Reprocess request accepted by Mirth.")
+        time.sleep(2)
+        max_after = mirth.max_message_id(channel_id)
+        audit["max_message_id"] = [max_before, max_after]
+
+        # Work out which message holds the result of the reprocess
+        created = None
+        if max_before is not None and max_after is not None:
+            created = max_after - max_before
+        target = mirth_id
+        if created is None:
+            print("Could not read the highest message ID; showing the original message.")
+        elif created == 0:
+            print(f"Message {mirth_id} was updated in place (no new message).")
+        elif created == 1:
+            target = max_after
+            print(f"Mirth created ONE new message: {target} (original {mirth_id} is left as it was).")
+        else:
+            target = max_after
+            print(
+                f"WARNING: {created} new messages were created (IDs {max_before + 1} to {max_after}). "
+                "Expected at most 1. Stop and check the channel before running again."
+            )
+        audit["messages_created"] = created
+        audit["result_message_id"] = target
 
         # Wait up to ~30 s for Mirth to finish, then report the final statuses
-        final = statuses
+        final: dict[int, str] = {}
         for _ in range(15):
-            time.sleep(2)
-            cur = mirth.get_message(channel_id, mirth_id)
+            cur = mirth.get_message(channel_id, target)
             if cur:
                 final = cur[1]
-                if not any(v in ("RECEIVED", "PENDING") for v in final.values()):
+                if final and not any(v in ("RECEIVED", "PENDING") for v in final.values()):
                     break
+            time.sleep(2)
         state = {dest_names.get(k, str(k)): v for k, v in sorted(final.items())}
-        print(f"Statuses after reprocess: {state}")
+        print(f"Statuses of message {target}: {state}")
         audit["statuses_after"] = state
+        if created is not None and created > 1:
+            audit["result"] = "UNEXPECTED_MULTIPLE_MESSAGES"
+            return 2
         audit["result"] = "REPROCESSED"
         return 0
     finally:
