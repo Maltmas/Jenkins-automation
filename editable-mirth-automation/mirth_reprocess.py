@@ -142,14 +142,22 @@ class Mirth:
             return None
 
     # ---- action ----
-    def reprocess(self, channel_id: str, message_id: int, dest_meta_ids: list[int] | None) -> None:
+    def reprocess(
+        self,
+        channel_id: str,
+        message_id: int,
+        dest_meta_ids: list[int] | None,
+        replace: bool = False,
+    ) -> None:
         """Reprocess ONE message.
 
         Uses POST /channels/{channelId}/messages/{messageId}/_reprocess. The message ID is
         part of the URL, so this can never touch any other message in the channel.
         dest_meta_ids=None -> reprocess the whole message (all connectors).
         """
-        params: dict = {}
+        # replace=true -> "the message will overwrite the current one" (same as the
+        # "Overwrite existing messages" tick box in the Mirth Administrator)
+        params: dict = {"replace": "true" if replace else "false"}
         if dest_meta_ids is None:
             params["filterDestinations"] = "false"
         else:
@@ -217,6 +225,7 @@ def do_reprocess(args: argparse.Namespace) -> int:
         "channel_name": args.channel,
         "business_message_id": args.message_id,
         "mode": "execute" if args.execute else "dry-run",
+        "overwrite": bool(args.overwrite),
     }
     mirth = connect(resolve_base_url(args), args.insecure)
     try:
@@ -302,13 +311,14 @@ def do_reprocess(args: argparse.Namespace) -> int:
         audit["plan"] = "whole-message" if plan_ids is None else f"destinations {plan_ids}"
 
         if not args.execute:
+            print(f"Overwrite existing message: {'YES' if args.overwrite else 'no'}")
             print("DRY RUN: nothing reprocessed. Add --execute to reprocess.")
             audit["result"] = "DRY_RUN_OK"
             return 0
 
         # 3. Reprocess and report
         max_before = mirth.max_message_id(channel_id)
-        mirth.reprocess(channel_id, mirth_id, plan_ids)
+        mirth.reprocess(channel_id, mirth_id, plan_ids, replace=args.overwrite)
         print("Reprocess request accepted by Mirth.")
         time.sleep(2)
         max_after = mirth.max_message_id(channel_id)
@@ -335,18 +345,30 @@ def do_reprocess(args: argparse.Namespace) -> int:
         audit["messages_created"] = created
         audit["result_message_id"] = target
 
-        # Wait up to ~30 s for Mirth to finish, then report the final statuses
+        # Wait (up to --wait seconds) for Mirth to finish, then report the final statuses.
+        # Some destinations (e.g. REST calls) take a while, so RECEIVED can last a long time.
         final: dict[int, str] = {}
-        for _ in range(15):
+        still_running = True
+        polls = max(1, args.wait // 3)
+        print(f"Waiting up to {args.wait} s for the destination to finish...")
+        for _ in range(polls):
             cur = mirth.get_message(channel_id, target)
             if cur:
                 final = cur[1]
-                if final and not any(v in ("RECEIVED", "PENDING") for v in final.values()):
+                still_running = (not final) or any(v in ("RECEIVED", "PENDING") for v in final.values())
+                if not still_running:
                     break
-            time.sleep(2)
+            time.sleep(3)
         state = {dest_names.get(k, str(k)): v for k, v in sorted(final.items())}
         print(f"Statuses of message {target}: {state}")
         audit["statuses_after"] = state
+        if still_running and not (created is not None and created > 1):
+            print(
+                f"NOTE: message {target} is still being processed by Mirth. The request was accepted; "
+                "check the final status in the Mirth Administrator, or re-run with a larger --wait."
+            )
+            audit["result"] = "REPROCESS_ACCEPTED_STILL_PROCESSING"
+            return 0
         if created is not None and created > 1:
             audit["result"] = "UNEXPECTED_MULTIPLE_MESSAGES"
             return 2
@@ -369,6 +391,12 @@ def main() -> int:
         action="append",
         help="Reprocess only this destination name (e.g. HTTPS). Repeat or comma-separate for several.",
     )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help='Same as ticking "Overwrite existing messages": the reprocess replaces the original message',
+    )
+    p.add_argument("--wait", type=int, default=120, help="Seconds to wait for the reprocess to finish (default 120)")
     p.add_argument("--execute", action="store_true", help="Actually reprocess (default is dry run)")
     p.add_argument("--insecure", action="store_true", help="Skip TLS certificate check (dev only)")
     p.add_argument("--base-url", help="e.g. https://10.15.10.102:9091 (default: MIRTH_URL or config.json)")
