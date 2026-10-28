@@ -1,13 +1,24 @@
 {
   "base_url": "https://10.15.10.102:9091",
-  "clients": {
-    "CHS": {
+  "environments": {
+    "DEV": {
       "channel_name": "4_0_Inbound_CCDA_CERNER",
-      "destination_name": "Destination 1"
+      "second_channel_name": "4_0_Inbound_CCDA_MEDHOST",
+      "first_server": "https://10.15.10.102:9091",
+      "second_server": "https://10.15.10.102:9091",
+      "destination_names": []
+    },
+    "CHS": {
+      "channel_name": "PCP_Notification_ADT_Outbound",
+      "first_server": "http://100.132.0.38:9090",
+      "second_server": "http://100.132.0.39:9090",
+      "destination_names": []
     },
     "LABFLY": {
-      "channel_name": "4_0_Inbound_CCDA_MEDHOST",
-      "destination_name": "Destination 1"
+      "channel_name": "CHANGE_ME",
+      "first_server": "https://10.15.12.134:9091",
+      "second_server": "https://10.15.12.135:9091",
+      "destination_names": []
     }
   }
 }
