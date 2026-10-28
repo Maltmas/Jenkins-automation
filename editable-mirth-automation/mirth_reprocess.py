@@ -104,10 +104,14 @@ class Mirth:
             result.append((int(mid), statuses))
         return result
 
-    def find_error_messages(self, channel_id: str, text: str):
+    def find_messages(self, channel_id: str, text: str, status: str | None = "ERROR"):
+        """Text-search a channel. status=None searches messages of every status."""
+        params: dict = {"textSearch": text, "includeContent": "false", "limit": 20}
+        if status:
+            params["status"] = status
         r = self.s.get(
             f"{self.base}/channels/{channel_id}/messages",
-            params={"textSearch": text, "status": "ERROR", "includeContent": "false", "limit": 20},
+            params=params,
             headers=XML_ACCEPT,
             timeout=(10, 120),
         )
@@ -220,12 +224,15 @@ def do_list(args: argparse.Namespace) -> int:
 
 
 def do_reprocess(args: argparse.Namespace) -> int:
+    if args.any_status and not args.destination:
+        raise MirthError("--any-status needs --destination, so only the named destination(s) are reprocessed")
     audit = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "channel_name": args.channel,
         "business_message_id": args.message_id,
         "mode": "execute" if args.execute else "dry-run",
         "overwrite": bool(args.overwrite),
+        "any_status": bool(args.any_status),
     }
     mirth = connect(resolve_base_url(args), args.insecure)
     try:
@@ -243,9 +250,12 @@ def do_reprocess(args: argparse.Namespace) -> int:
                 raise MirthError(f"Mirth message {args.mirth_message_id} not found")
             candidates = [msg]
         else:
-            candidates = mirth.find_error_messages(channel_id, args.message_id)
+            candidates = mirth.find_messages(
+                channel_id, args.message_id, None if args.any_status else "ERROR"
+            )
             if not candidates:
-                raise MirthError(f"No ERROR message found in {args.channel} for ID {args.message_id}")
+                kind = "message" if args.any_status else "ERROR message"
+                raise MirthError(f"No {kind} found in {args.channel} for ID {args.message_id}")
             if len(candidates) > 1:
                 ids = ", ".join(str(c[0]) for c in candidates)
                 raise MirthError(
@@ -264,7 +274,7 @@ def do_reprocess(args: argparse.Namespace) -> int:
         for k in sorted(statuses):
             print(f"    {dest_names.get(k, k)}: {statuses[k]}")
 
-        if not error_ids:
+        if not error_ids and not args.any_status:
             audit["result"] = "SKIPPED_NOT_ERROR"
             raise MirthError("No connector of this message is in ERROR. Nothing done.")
 
@@ -289,7 +299,10 @@ def do_reprocess(args: argparse.Namespace) -> int:
 
         if selected is not None:
             names = ", ".join(dest_names[m] for m in selected)
-            if 0 in error_ids:
+            if args.any_status:
+                plan_ids = selected
+                print(f"Plan: --any-status: reprocess ONLY {names}, whatever its current status.")
+            elif 0 in error_ids:
                 plan_ids = selected
                 print(f"Plan: Source is in ERROR -> reprocess the message, sending ONLY to: {names}")
             else:
@@ -390,6 +403,11 @@ def main() -> int:
         "--destination",
         action="append",
         help="Reprocess only this destination name (e.g. HTTPS). Repeat or comma-separate for several.",
+    )
+    p.add_argument(
+        "--any-status",
+        action="store_true",
+        help="Also find and reprocess messages that are NOT in ERROR (needed for 'missing PDF' alerts). Requires --destination.",
     )
     p.add_argument(
         "--overwrite",
