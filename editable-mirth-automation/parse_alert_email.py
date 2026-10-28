@@ -74,6 +74,17 @@ def parse(text: str) -> dict:
     }
 
 
+def problem_with(result: dict) -> str | None:
+    """Return a message if the parsed email is NOT safe to act on, else None."""
+    if result["alert_type"] is None:
+        return "not a recognised alert email (expected 'MISSING PDF ALERT' or 'MISSING / INVALID PDF ALERT')."
+    if not result["control_id"]:
+        return "no Message Control ID found."
+    if result["msh_control_id"] and result["msh_control_id"] != result["control_id"]:
+        return "the Message Control ID line and the MSH segment disagree. Not safe to act."
+    return None
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Extract the Message Control ID from an alert email")
     p.add_argument("--file", help="Text file containing the email body")
@@ -91,14 +102,9 @@ def main() -> int:
     result = parse(text)
     print(json.dumps(result))
 
-    if result["alert_type"] is None:
-        print("ERROR: not a recognised alert email (expected 'MISSING PDF ALERT' or 'MISSING / INVALID PDF ALERT').", file=sys.stderr)
-        return 1
-    if not result["control_id"]:
-        print("ERROR: no Message Control ID found.", file=sys.stderr)
-        return 1
-    if result["msh_control_id"] and result["msh_control_id"] != result["control_id"]:
-        print("ERROR: the Message Control ID line and the MSH segment disagree. Not safe to act.", file=sys.stderr)
+    msg = problem_with(result)
+    if msg:
+        print(f"ERROR: {msg}", file=sys.stderr)
         return 1
     return 0
 
