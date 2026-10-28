@@ -32,6 +32,7 @@ HERE = Path(__file__).resolve().parent
 HDR = {"X-Requested-With": "OpenAPI"}
 XML_ACCEPT = {**HDR, "Accept": "application/xml"}
 TIMEOUT = (10, 60)
+LAST_AUDIT: dict = {}  # filled by do_reprocess so other scripts can read the outcome
 
 
 class MirthError(Exception):
@@ -130,6 +131,33 @@ class Mirth:
         r.raise_for_status()
         found = self._parse_messages(r.content)
         return found[0] if found else None
+
+    # ---- statistics ----
+    def statistics(self, channel_id: str) -> dict[str, int]:
+        """Channel-level statistics (received, filtered, sent, error, ...)."""
+        r = self.s.get(f"{self.base}/channels/{channel_id}/statistics", headers=XML_ACCEPT, timeout=TIMEOUT)
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        out: dict[str, int] = {}
+        for tag in ("received", "filtered", "sent", "error", "queued", "pending"):
+            el = root.find(f".//{tag}")
+            if el is not None and el.text and el.text.strip().lstrip("-").isdigit():
+                out[tag] = int(el.text.strip())
+        return out
+
+    def clear_error_statistics(self, channel_id: str, dest_meta_ids: list[int]) -> None:
+        """Clear ONLY the 'Errored' statistic of one channel (same as the Clear Statistics
+        dialog with only 'Errored' ticked). received/filtered/sent are sent as false."""
+        ids = "".join(f"<int>{i}</int>" for i in [0, *dest_meta_ids])
+        body = f"<map><entry><string>{channel_id}</string><list><null/>{ids}</list></entry></map>"
+        r = self.s.post(
+            f"{self.base}/channels/_clearStatistics",
+            params={"received": "false", "filtered": "false", "sent": "false", "error": "true"},
+            data=body,
+            headers={**HDR, "Content-Type": "application/xml"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
 
     def max_message_id(self, channel_id: str) -> int | None:
         """Highest message ID in the channel (used to detect new messages)."""
@@ -390,6 +418,8 @@ def do_reprocess(args: argparse.Namespace) -> int:
     finally:
         mirth.logout()
         audit.setdefault("result", "FAILED")
+        LAST_AUDIT.clear()
+        LAST_AUDIT.update(audit)
         print(f"Audit written: {write_audit(audit).name}")
 
 
