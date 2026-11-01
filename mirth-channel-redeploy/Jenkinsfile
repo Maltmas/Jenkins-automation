@@ -1,0 +1,69 @@
+// Post-deployment Mirth step: Poll Once on Start = Yes -> Save -> Redeploy
+// Standalone project inside a shared repo.
+// Lives in <repo>/mirth-channel-redeploy/ - set Jenkins 'Script Path' to
+// mirth-channel-redeploy/Jenkinsfile. Uses its own config.json and credential.
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'MIRTH_ENV', choices: ['CHS'], description: 'Environment key in scripts/config.json')
+        string(name: 'CHANNEL_NAMES', defaultValue: '',
+               description: 'Comma-separated exact channel names, e.g. 4_0_Inbound_CCDA_CERNER')
+        booleanParam(name: 'EXECUTE', defaultValue: false,
+                     description: 'Untick = dry run (shows plan only). Tick = save + redeploy.')
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Validate') {
+            steps {
+                script {
+                    if (!params.CHANNEL_NAMES?.trim()) {
+                        error 'CHANNEL_NAMES is required'
+                    }
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Setup') {
+            steps {
+                dir('mirth-channel-redeploy') {
+                    sh 'python3 -m pip install --user --quiet -r requirements.txt'
+                }
+            }
+        }
+
+        stage('Poll-on-start + Redeploy') {
+            steps {
+                // Separate Jenkins credential for this project
+                withCredentials([usernamePassword(credentialsId: 'mirth-redeploy-dev-creds',
+                                                  usernameVariable: 'MIRTH_USERNAME',
+                                                  passwordVariable: 'MIRTH_PASSWORD')]) {
+                    dir('mirth-channel-redeploy') {
+                    sh """
+                        python3 mirth_redeploy.py \\
+                            --env '${params.MIRTH_ENV}' \\
+                            --channel '${params.CHANNEL_NAMES}' \\
+                            ${params.EXECUTE ? '--execute' : ''}
+                    """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'mirth-channel-redeploy/audit/redeploy-*.json', allowEmptyArchive: true
+        }
+    }
+}
