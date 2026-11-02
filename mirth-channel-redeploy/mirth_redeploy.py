@@ -98,13 +98,16 @@ class Mirth:
 
     # ---- actions ----
     def save_channel(self, channel_id: str, xml: str) -> None:
+        # No XML Accept header here: on Mirth 4.5 this endpoint answers 406 if we
+        # insist on XML for its true/false reply. Let Mirth pick the reply format.
         r = self.s.put(f"{self.base}/channels/{channel_id}",
                        params={"override": "true"},
                        data=xml.encode("utf-8"),
-                       headers={**XML_ACCEPT, "Content-Type": "application/xml"},
+                       headers={**HDR, "Content-Type": "application/xml", "Accept": "*/*"},
                        timeout=TIMEOUT)
         r.raise_for_status()
-        if "<boolean>false</boolean>" in r.text:
+        reply = r.text.strip().lower()
+        if reply in ("false", "<boolean>false</boolean>") or '"boolean":false' in reply.replace(" ", ""):
             raise MirthError("Mirth refused to save the channel")
 
     def deploy(self, channel_id: str) -> None:
@@ -184,7 +187,12 @@ def process(mirth: Mirth, server: str, name: str, cid: str, args, audit_rows: li
 
     if status == "changed":
         mirth.save_channel(cid, new_xml)
-        print("Saved: Poll Once on Start = Yes")
+        # Confirm the save really happened by reading the channel back
+        _, check = enable_poll_on_start(mirth.channel_xml(cid))
+        if check != "already":
+            row["result"] = "FAILED_SAVE_NOT_APPLIED"
+            raise MirthError("Save returned OK but Poll Once on Start is still No in Mirth")
+        print("Saved: Poll Once on Start = Yes (verified)")
 
     before = mirth.received(cid)
     mirth.deploy(cid)
