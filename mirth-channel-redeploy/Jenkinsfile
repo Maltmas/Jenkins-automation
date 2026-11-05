@@ -7,7 +7,7 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'MIRTH_ENV', choices: ['CHS'], description: 'Environment key in scripts/config.json')
+        choice(name: 'MIRTH_ENV', choices: ['DEV', 'CHS'], description: 'Environment key in config.json')
         string(name: 'CHANNEL_NAMES', defaultValue: '',
                description: 'Comma-separated exact channel names, e.g. 4_0_Inbound_CCDA_CERNER')
         booleanParam(name: 'EXECUTE', defaultValue: false,
@@ -15,7 +15,8 @@ pipeline {
     }
 
     options {
-        timeout(time: 20, unit: 'MINUTES')
+        // No Jenkins timeout on purpose: the read can take 5+ hours and the script
+        // waits until Reading -> Idle. The script stops by itself if Mirth is unreachable.
         disableConcurrentBuilds()
     }
 
