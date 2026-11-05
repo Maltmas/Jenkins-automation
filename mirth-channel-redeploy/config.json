@@ -1,4 +1,15 @@
 {
+  "email": {
+    "smtp_host": "",
+    "smtp_port": 587,
+    "starttls": true,
+    "from": "",
+    "to": ["techsvc@agilonhealth.com"]
+  },
+  "DEV": {
+    "server": "https://10.15.10.102:9091",
+    "insecure": true
+  },
   "CHS": {
     "server": "http://100.132.0.38:9090"
   }
