@@ -42,15 +42,37 @@ Options:
 | `--poll-timeout 0` | Optional safety stop in seconds (0 = no limit, default). Reaching it is a FAILURE and Poll Once on Start stays Yes |
 | `--check-interval 30` | Seconds between checks once Reading is seen (1 s before that) |
 | `--retry-window 600` | Keep retrying this long if Mirth is unreachable during the wait |
+| `--check-api` | Only report which Mirth status APIs are readable (changes nothing) |
 | `--no-email` | Do not send the result email |
 | `--insecure` | Skip TLS check (also settable per environment: `"insecure": true`) |
 
 ## When is the poll "finished"?
 
-Only when the source connector was seen **Reading** (Dashboard Connection column,
-Mirth connection log, or new messages received) **and** is back to **Idle**.
-Time passing never counts as finished. If that can't be confirmed, Poll Once on Start
+Only when the poll was seen to run **and** the source connector is then **Idle**
+(an Idle reading taken *after* the run was proven, never a stale one).
+
+"Seen to run" means any of: the Dashboard Connection column showed **Reading**, the Mirth
+**server log** has a line from this channel (channel name in the message or polling-thread
+name, e.g. `Execution start` / `Skipping this cycle`), a Reading event in the connection log,
+or new messages received. The server log catches cycles that end in milliseconds.
+
+Time passing never counts as finished. If the run can't be confirmed, Poll Once on Start
 is left as Yes and the email reports a failure so someone can check.
+
+## Safety checks
+
+- **Never redeploys mid-read.** If the channel is Reading when the script starts
+  (e.g. the scheduled run), it waits for that cycle to finish first, so the channel's
+  lock is never left held by an interrupted run.
+- **Warnings** (email subject says WARNING) when the cycle was **skipped** because the
+  lock was held, when the channel logged **ERROR** lines during the poll, or when the
+  poll received **0 messages**.
+- Server-log text is only matched in memory; it is never printed, stored or emailed.
+
+## API check
+
+`--check-api` logs in and reports which status sources Mirth exposes for the channel
+(connection state, connection log, server log). It changes nothing.
 
 ## Email
 
