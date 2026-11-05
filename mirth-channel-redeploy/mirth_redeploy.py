@@ -192,6 +192,53 @@ class Mirth:
                 out.append((log_id, str(it.get("event") or "").strip()))
         return out
 
+    def server_logs(self, after_id: int = 0) -> list[dict] | None:
+        """Recent Mirth server-log entries newer than after_id as
+        [{"id", "level", "thread", "message"}]. None if the log can't be read.
+        Used only in memory to recognise this channel's own lines; log text is
+        never printed, stored or emailed (other channels' lines could hold PHI)."""
+        url = f"{self.base}/extensions/serverlog"
+        params = {"fetchSize": 500}
+        if after_id:
+            params["lastLogId"] = after_id
+        try:
+            r = self._req("GET", url, params=params, headers=XML_ACCEPT, timeout=TIMEOUT)
+            if r.status_code == 406:
+                r = self._req("GET", url, params=params, headers={**HDR, "Accept": "*/*"}, timeout=TIMEOUT)
+            if r.status_code != 200:
+                return None
+            if not r.content.strip():
+                return []
+            text = r.text.strip()
+            raw: list[dict] = []
+            if text[:1] in "{[":
+                def walk(o):
+                    if isinstance(o, dict):
+                        if "message" in o and "id" in o:
+                            raw.append(o)
+                        for v in o.values():
+                            walk(v)
+                    elif isinstance(o, list):
+                        for v in o:
+                            walk(v)
+                walk(json.loads(text))
+            else:
+                for el in ET.fromstring(r.content).iter():
+                    if el.find("message") is not None and el.find("id") is not None:
+                        raw.append({c.tag: (c.text or "") for c in el})
+        except (requests.RequestException, ValueError, ET.ParseError):
+            return None
+        out = []
+        for it in raw:
+            try:
+                lid = int(str(it.get("id")).strip())
+            except ValueError:
+                continue
+            if lid > after_id:
+                out.append({"id": lid, "level": str(it.get("level") or "").upper(),
+                            "thread": str(it.get("threadName") or ""), "message": str(it.get("message") or "")})
+        return out
+
     # ---- actions ----
     def save_channel(self, channel_id: str, xml: str) -> None:
         # No XML Accept header here: on Mirth 4.5 this endpoint answers 406 if we
@@ -299,12 +346,76 @@ def is_reading(state: str) -> bool:
     return any(w in st for w in ("read", "poll", "receiv", "process"))
 
 
-def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline: int, args) -> dict:
+class LogWatch:
+    """Watches the Mirth server log for lines written by ONE channel after the redeploy.
+
+    A line belongs to the channel if the channel name appears (as a whole name) in the
+    log message or in the polling thread's name. Any such line proves a poll ran, even
+    one that ended in milliseconds (e.g. "Skipping this cycle" when the lock is held).
+    """
+
+    def __init__(self, mirth: Mirth, name: str) -> None:
+        self.mirth, self.available = mirth, True
+        self.rx = re.compile(rf"(?<![\w]){re.escape(name)}(?![\w])")
+        self.seen = self.skipped = False
+        self.errors = 0
+        logs = mirth.server_logs(0)
+        if logs is None:
+            self.available = False
+            self.last_id = 0
+        else:
+            self.last_id = max((x["id"] for x in logs), default=0)
+
+    def update(self) -> None:
+        if not self.available:
+            return
+        try:
+            logs = self.mirth.server_logs(self.last_id)
+        except ERRORS:
+            logs = None
+        if not logs:
+            return
+        self.last_id = max(self.last_id, max(x["id"] for x in logs))
+        for x in logs:
+            if self.rx.search(x["message"]) or self.rx.search(x["thread"]):
+                self.seen = True
+                if "skipping this cycle" in x["message"].lower():
+                    self.skipped = True
+                if x["level"] in ("ERROR", "FATAL"):
+                    self.errors += 1
+
+
+def wait_idle_before_redeploy(mirth: Mirth, cid: str, args) -> None:
+    """Never redeploy in the middle of a read: interrupting it could leave the channel's
+    lock held (all later cycles would then skip). If Reading, wait until Idle first."""
+    st = mirth.source_connection_state(cid)
+    if st is None:
+        raise MirthError("Cannot read the channel's Connection state, so it is not safe to redeploy")
+    if not is_reading(st):
+        return
+    print(f"Channel is currently {st} - waiting for the current cycle to finish before redeploying...")
+    t0 = time.time()
+    while True:
+        time.sleep(args.check_interval)
+        try:
+            st = mirth.source_connection_state(cid)
+        except ERRORS:
+            st = None
+        if st and not is_reading(st):
+            print(f"    current cycle finished ({int((time.time() - t0) / 60)} min) - continuing")
+            return
+        if time.time() - t0 >= 300 and int(time.time() - t0) % 300 < args.check_interval:
+            print(f"    still waiting for the current cycle ({int((time.time() - t0) / 60)} min)")
+
+
+def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline: int,
+                       logw: LogWatch, args) -> dict:
     """Wait until the source connector has been Reading and is back to Idle.
 
     The poll is ONLY treated as finished when both are true:
-      - reading was seen: state Reading in the Dashboard, a Reading event in the
-        connection log after the redeploy, or new messages received, and
+      - the poll was seen to run: state Reading in the Dashboard, a line from this
+        channel in the Mirth server log, a Reading event in the connection log,
+        or new messages received, and
       - the source connector's state is now Idle.
     Time passing never counts as finished. --poll-timeout (0 = no limit, default)
     only stops waiting and reports a failure; Poll Once on Start is then left as Yes.
@@ -339,8 +450,14 @@ def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline:
         if st and st != last:
             print(f"    source connector: {st}")
             last = st
+        newly_seen = False  # run proven by log/messages AFTER this state sample was taken
         if st and is_reading(st):
             seen_reading = True
+
+        logw.update()
+        if logw.seen and not seen_reading:
+            seen_reading = newly_seen = True
+            print("    server log: channel ran" + (" (cycle SKIPPED - lock held)" if logw.skipped else ""))
 
         if not seen_reading:
             try:
@@ -348,7 +465,7 @@ def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline:
             except ERRORS:
                 events = []
             if any(lid > log_baseline and is_reading(ev) for lid, ev in events):
-                seen_reading = True
+                seen_reading = newly_seen = True
                 print("    connection log: Reading recorded")
             else:
                 try:
@@ -356,10 +473,11 @@ def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline:
                 except ERRORS:
                     rec = None
                 if before is not None and rec is not None and rec > before:
-                    seen_reading = True
+                    seen_reading = newly_seen = True
                     print("    new message received (channel has read)")
 
-        if seen_reading and st and st.lower() == "idle":
+        # Finish only on an Idle state read AFTER the run was proven (never a stale sample)
+        if seen_reading and not newly_seen and st and st.lower() == "idle":
             secs = int(time.time() - t0)
             print(f"Polling finished: Reading -> Idle (~{secs}s)")
             return {"poll_seen_reading": True, "poll_seconds": secs}
@@ -369,7 +487,7 @@ def wait_poll_finished(mirth: Mirth, cid: str, before: int | None, log_baseline:
             last_note = time.time()
         # Check every second until Reading is seen (so a fast poll is not missed),
         # then every --check-interval seconds to keep load on Mirth negligible.
-        time.sleep(args.check_interval if seen_reading else 1)
+        time.sleep(args.check_interval if seen_reading and not newly_seen else 1)
 
 
 # --------------------------------------------------------------------------- one channel
@@ -388,26 +506,33 @@ def process(mirth: Mirth, server: str, name: str, cid: str, args, rows: list) ->
 
     if not args.execute:
         steps = ["set Poll Once on Start = Yes and save"] if status == "changed" else []
+        if is_reading(mirth.source_connection_state(cid) or ""):
+            steps.insert(0, "wait for the current Reading cycle to finish")
         steps += ["redeploy", "wait until the source goes Reading -> Idle",
-                  "then set Poll Once on Start = No and save"]
+                  "set Poll Once on Start = No and save"]
         print("DRY RUN: would " + ", then ".join(steps) + ". Add --execute to run.")
         row["result"] = "DRY_RUN_OK"
         return
 
     err: Exception | None = None
     poll_done = False
+    logw = None
     try:
+        wait_idle_before_redeploy(mirth, cid, args)
         if save_poll_on_start(mirth, cid, True) == "changed":
             print("Saved: Poll Once on Start = Yes (verified)")
         before = mirth.received(cid)
         events = mirth.source_events(cid) or []
         log_baseline = max((lid for lid, _ in events), default=0)
+        logw = LogWatch(mirth, name)
+        if not logw.available:
+            print("    note: Mirth server log not readable - a very fast/skipped cycle may not be detected")
         mirth.deploy(cid)
         print("Redeploy requested, waiting for STARTED...")
         wait_started(mirth, cid, args.wait)
         row["state_after"] = "STARTED"
         print("STARTED - waiting for polling to finish...")
-        row.update(wait_poll_finished(mirth, cid, before, log_baseline, args))
+        row.update(wait_poll_finished(mirth, cid, before, log_baseline, logw, args))
         poll_done = True
         try:
             after = mirth.received(cid)
@@ -417,6 +542,21 @@ def process(mirth: Mirth, server: str, name: str, cid: str, args, rows: list) ->
         if before is not None and after is not None:
             row["received_during_poll"] = after - before
             print(f"Received: {before} -> {after} (+{after - before})")
+        logw.update()
+        warnings = []
+        if logw.skipped:
+            warnings.append("The channel SKIPPED this cycle (lock held by another instance/server). "
+                            "No data was processed by this run - please check the channel's lock.")
+        if logw.errors:
+            warnings.append(f"{logw.errors} ERROR line(s) from this channel in the Mirth server log "
+                            "during the poll - please check the server log.")
+        if row.get("received_during_poll") == 0 and not logw.skipped:
+            warnings.append("0 messages were received by the poll - please confirm this is expected "
+                            "(no new files) and not a silent error.")
+        if warnings:
+            row["warnings"] = warnings
+            for w in warnings:
+                print(f"WARNING: {w}")
     except ERRORS as e:
         err = e
 
@@ -437,8 +577,8 @@ def process(mirth: Mirth, server: str, name: str, cid: str, args, rows: list) ->
         row["error"] = str(err)
         row.setdefault("result", "FAILED")
         raise err
-    row["result"] = "COMPLETED"
-    print(f"{name}: completed")
+    row["result"] = "COMPLETED_WITH_WARNINGS" if row.get("warnings") else "COMPLETED"
+    print(f"{name}: completed" + (" (with warnings)" if row.get("warnings") else ""))
 
 
 # --------------------------------------------------------------------------- config / email / audit
@@ -472,9 +612,11 @@ def resolve_server(args, cfg: dict) -> tuple[str, bool]:
 
 def build_email(audit: dict) -> tuple[str, str]:
     ok = audit["result"] == "OK"
+    warn = ok and any(r.get("warnings") for r in audit["rows"])
+    status = "FAILED" if not ok else ("WARNING" if warn else "SUCCESS")
     label = audit.get("env") or audit.get("server") or "Mirth"
     names = ", ".join(audit["channels"])
-    subject = f"[Mirth redeploy] {label} - {'SUCCESS' if ok else 'FAILED'} - {names}"
+    subject = f"[Mirth redeploy] {label} - {status} - {names}"
     lines = [
         "Mirth channel poll-on-start redeploy",
         "",
@@ -482,7 +624,7 @@ def build_email(audit: dict) -> tuple[str, str]:
         f"Server      : {audit.get('server', '-')}",
         f"Started     : {audit['started_local']}",
         f"Finished    : {audit['finished_local']}",
-        f"Result      : {'SUCCESS' if ok else 'FAILED'}",
+        f"Result      : {status}",
     ]
     if audit.get("setup_error"):
         lines.append(f"Error       : {audit['setup_error']}")
@@ -499,6 +641,8 @@ def build_email(audit: dict) -> tuple[str, str]:
             lines.append(f"  Messages received by the poll : {r['received_during_poll']}")
         if "poll_on_start_after" in r:
             lines.append(f"  Poll Once on Start after run  : {r['poll_on_start_after']}")
+        for w in r.get("warnings", []):
+            lines.append(f"  WARNING                       : {w}")
         if r.get("error"):
             lines.append(f"  Error                         : {r['error']}")
     lines += ["", "This message was sent automatically by mirth-channel-redeploy. "
@@ -542,6 +686,27 @@ def now_local() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def check_api(mirth: Mirth, name: str, cid: str | None) -> None:
+    """Report which status sources work for this channel. Prints no log or message content."""
+    print(f"\n--- API check for {name}")
+    if not cid:
+        print("  channel                : NOT FOUND")
+        return
+    print(f"  channel id             : {cid}")
+    print(f"  deployed state         : {mirth.state(cid)}")
+    print(f"  connection state       : {mirth.source_connection_state(cid)!r}  (None = not readable)")
+    ev = mirth.source_events(cid)
+    print(f"  connection log         : {'not readable' if ev is None else f'{len(ev)} source event(s)'}")
+    logs = mirth.server_logs(0)
+    if logs is None:
+        print("  server log             : not readable")
+    else:
+        rx = re.compile(rf"(?<![\w]){re.escape(name)}(?![\w])")
+        mine = sum(1 for x in logs if rx.search(x["message"]) or rx.search(x["thread"]))
+        print(f"  server log             : {len(logs)} recent line(s), {mine} from this channel")
+    print(f"  received count         : {mirth.received(cid)}")
+
+
 # --------------------------------------------------------------------------- main
 def main() -> int:
     p = argparse.ArgumentParser(description="Mirth poll-on-start redeploy automation")
@@ -559,6 +724,8 @@ def main() -> int:
                    help="Seconds between status checks once Reading has been seen (default 30)")
     p.add_argument("--retry-window", type=int, default=600,
                    help="Keep retrying this many seconds if Mirth is unreachable while waiting (default 600)")
+    p.add_argument("--check-api", action="store_true",
+                   help="Only check which Mirth status APIs are readable for the channel (changes nothing)")
     p.add_argument("--no-email", action="store_true", help="Do not send the result email")
     p.add_argument("--insecure", action="store_true", help="Skip TLS check (HTTPS dev servers only)")
     args = p.parse_args()
@@ -584,6 +751,10 @@ def main() -> int:
         try:
             mirth.login(user, pwd)
             ids = mirth.channels()
+            if args.check_api:
+                for name in names:
+                    check_api(mirth, name, ids.get(name))
+                return 0
             for name in names:
                 cid = ids.get(name)
                 if not cid:
