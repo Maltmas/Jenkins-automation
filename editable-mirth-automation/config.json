@@ -2,12 +2,12 @@
   "base_url": "https://10.15.10.102:9091",
   "environments": {
     "DEV": {
-      "channel_name": "4_0_Inbound_CCDA_CERNER",
-      "second_channel_name": "4_0_MDM_Inbound_HL7_2_CERNER",
-      "first_server": "https://10.15.10.102:9091",
-      "second_server": "https://10.15.10.102:9091",
-      "destination_names": []
-    },
+  "channel_name": "4_0_MFN_Inbound_HL7_MEDHOST_CDW",
+  "second_channel_name": "4_0_MDM_Inbound_HL7_2_CERNER",
+  "first_server": "https://10.15.10.102:9091",
+  "second_server": "https://10.15.10.102:9091",
+  "destination_names": []
+},
     "CHS": {
       "channel_name": "PCP_Notification_ADT_Outbound",
       "first_server": "http://100.132.0.38:9090",
